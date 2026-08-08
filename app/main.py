@@ -1,4 +1,3 @@
-import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -8,6 +7,7 @@ from app.memory import get_history, add_message
 from app.database import Base, engine, SessionLocal
 from app.models import Memory
 from app.memory_service import save_memory, get_memories
+from app.vector_store import add_memory, search_memories
 
 load_dotenv()
 
@@ -15,19 +15,19 @@ app = FastAPI()
 
 Base.metadata.create_all(bind=engine)
 
-llm = ChatGroq(
-    model="llama-3.1-8b-instant",
-    temperature=0
-)
+llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0)
+
 
 class MemoryRequest(BaseModel):
     user_id: str
     content: str
 
+
 class ChatRequest(BaseModel):
     user_id: str
     session_id: str
     message: str
+
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
@@ -35,23 +35,16 @@ async def chat(request: ChatRequest):
 
     db = SessionLocal()
     try:
-        memories = get_memories(db, request.user_id)
+        memories = search_memories(request.user_id, request.message, k=3)
     finally:
         db.close()
 
     messages = []
 
     if memories:
-        memory_text = "\n".join(
-            f"- {memory.content}"
-            for memory in memories
-        )
+        memory_text = "\n".join(f"- {memory.page_content}" for memory in memories)
 
-        messages.append(
-            HumanMessage(
-                content=f"Relevant user memories:\n{memory_text}"
-            )
-        )
+        messages.append(HumanMessage(content=f"Relevant user memories:\n{memory_text}"))
 
     for message in history:
         if message["role"] == "user":
@@ -63,41 +56,26 @@ async def chat(request: ChatRequest):
 
     response = await llm.ainvoke(messages)
 
-    add_message(
-        request.session_id,
-        "user",
-        request.message
-    )
+    add_message(request.session_id, "user", request.message)
 
-    add_message(
-        request.session_id,
-        "assistant",
-        response.content
-    )
+    add_message(request.session_id, "assistant", response.content)
 
-    return {
-        "session_id": request.session_id,
-        "response": response.content
-    }
+    return {"session_id": request.session_id, "response": response.content}
+
 
 @app.post("/memories")
 async def create_memory(request: MemoryRequest):
     db = SessionLocal()
 
     try:
-        memory = save_memory(
-            db,
-            request.user_id,
-            request.content
-        )
+        memory = save_memory(db, request.user_id, request.content)
 
-        return {
-            "id": memory.id,
-            "user_id": memory.user_id,
-            "content": memory.content
-        }
+        add_memory(memory.id, memory.user_id, memory.content)
+
+        return {"id": memory.id, "user_id": memory.user_id, "content": memory.content}
     finally:
         db.close()
+
 
 @app.get("/memories/{user_id}")
 async def list_memories(user_id: str):
@@ -107,11 +85,7 @@ async def list_memories(user_id: str):
         memories = get_memories(db, user_id)
 
         return [
-            {
-                "id": memory.id,
-                "user_id": memory.user_id,
-                "content": memory.content
-            }
+            {"id": memory.id, "user_id": memory.user_id, "content": memory.content}
             for memory in memories
         ]
     finally:
