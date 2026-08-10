@@ -1,6 +1,6 @@
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, AIMessage
 from app.memory import get_history, add_message
@@ -29,8 +29,32 @@ class ChatRequest(BaseModel):
     message: str
 
 
+class MemoryDecision(BaseModel):
+    should_save: bool = Field(
+        description="Whether this information is useful as long-term user memory."
+    )
+    memory: str | None = Field(
+        default=None,
+        description="A concise statement of the user information worth remembering.",
+    )
+
+
+memory_llm = llm.with_structured_output(MemoryDecision)
+
+
 @app.post("/chat")
 async def chat(request: ChatRequest):
+    memory_decision = await extract_memory(request.message)
+    if memory_decision.should_save and memory_decision.memory:
+        db = SessionLocal()
+
+        try:
+            memory = save_memory(db, request.user_id, memory_decision.memory)
+
+            add_memory(memory.id, memory.user_id, memory.content)
+
+        finally:
+            db.close()
     history = get_history(request.session_id)
 
     db = SessionLocal()
@@ -90,3 +114,33 @@ async def list_memories(user_id: str):
         ]
     finally:
         db.close()
+
+
+async def extract_memory(message: str):
+    prompt = f"""
+Decide whether the following user message contains useful
+long-term information about the user.
+
+Save things such as:
+- preferences
+- interests
+- goals
+- skills
+- important personal facts
+- technology preferences
+
+Do not save:
+- questions
+- temporary requests
+- greetings
+- jokes
+- general knowledge
+- information that is not about the user
+
+If it should be saved, rewrite it as one concise user-specific memory.
+
+User message:
+{message}
+"""
+
+    return await memory_llm.ainvoke(prompt)
