@@ -1,13 +1,18 @@
+import logging
+
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_groq import ChatGroq
-from langchain_core.messages import HumanMessage, AIMessage
-from app.memory import get_history, add_message
-from app.database import Base, engine, SessionLocal
-from app.models import Memory
-from app.memory_service import save_memory, get_memories
+from pydantic import BaseModel, Field
+
+from app.config import MAX_RELEVANT_MEMORIES
+from app.database import Base, SessionLocal, engine
+from app.memory import add_message, get_history
+from app.memory_service import get_memories, save_memory
 from app.vector_store import add_memory, search_memories
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -50,6 +55,7 @@ async def chat(request: ChatRequest):
 
         try:
             memory = save_memory(db, request.user_id, memory_decision.memory)
+            logger.info("Memory decision: should_save=%s", memory_decision.should_save)
 
             add_memory(memory.id, memory.user_id, memory.content)
 
@@ -59,7 +65,10 @@ async def chat(request: ChatRequest):
 
     db = SessionLocal()
     try:
-        memories = search_memories(request.user_id, request.message, k=3)
+        memories = search_memories(
+            request.user_id, request.message, k=MAX_RELEVANT_MEMORIES
+        )
+        logger.info("Retrieved %d memories for user %s", len(memories), request.user_id)
     finally:
         db.close()
 
